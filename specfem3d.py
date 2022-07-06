@@ -14,6 +14,7 @@ class SPECFEM3D():
         self.infbc     = False
         self.isfsubc   = False # Is displacement BC defined on the all unique SEM nodes on the free surface.
         self.isstress0 = False # No pre-stress
+        self.solver_diagscale = False
 
     def initialise(self):
 
@@ -57,6 +58,9 @@ class SPECFEM3D():
 
         self._allocate_free_variables_and_others()
 
+
+        # Compute the mass matrix:
+        self._compute_mass_elastic_WE()
 
     def _calc_relaxation_time(self):
         # currently not implemented:
@@ -276,3 +280,51 @@ class SPECFEM3D():
         self.storemmat          = np.zeros((self.m.nedof, self.m.nelem))
 
 
+    def _allocate_inbuild_preconditioner(self):
+
+        self.storederiv = np.zeros((self.m.ndim, self.m.ngll, self.m.ngll, self.m.nelmt))
+        self.storejw    = np.zeros((self.m.ngll, self.m.nelmt))
+
+        self.dprecon    = np.zeros(self.neq)
+
+        # Scaled diagonal preconditioner?
+        if self.solver_diagscale:
+            self.ndscale = np.zeros(self.neq)
+
+
+
+
+    def _compute_mass_elastic_WE(self):
+        # Our mass matrix is a sum over (1) gll pts (2) deg. of freedom (3 for disp)
+        # Each element of the sum over (1) and (2) is an element in the storemmat
+        # --> each eleemnt therefore holds a value which is a sum over j
+        # therefore for any element , e.g. the first element, storemmat[:,0],
+        # the order will be [gll1_x, gll1_y, gll1_z, gll2_x ..., gllN_z]
+        print(np.shape(self.storemmat))
+
+        print(f"Computing mass matrix with {self.m.nndof} degrees of freedom.")
+
+        elem_ind = 0  # index from 0 to nelem
+        ind      = 0  # index from 0 to nndof - 1
+        gll_ind  = 0  # index from 0 to ngll -1
+
+        # For single element:
+        for alpha in range(self.m.ngllx):
+            for beta in range(self.m.nglly):
+                for gamma in range(self.m.ngllz):
+                    for i in range(self.m.nndof):
+                        # The above loops basicallly make a sum over all
+                        # degrees of freedom in an element at the nodal level
+                        #self.storemmat[ind]
+
+                        w     = self.m.gll_weights[gll_ind]                 # Product of weights
+                        kappa = self.m.bulkmod_elmt[gll_ind, elem_ind]      # Bulk modulus for element
+
+                        # NUM is the IDs of the element
+                        # Hex8Gnode is the corner values?
+                        # gcoords then gets the coordinates in gll space
+                        #   this is an 8 x 3 (3 coordinates for each corner node)
+                        # Coord is then just the transpose of this
+
+                        ind += 1
+                    gll_ind += 1
