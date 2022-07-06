@@ -6,12 +6,25 @@ from GLL import *
 from hex_classes import hex_face, hex_face_edge
 
 
+g_acc      = 9.8200000000 # I think they use this instead of 9.81
+GRAV_CONS  = 6.67408e-11
+
+class Material_Block():
+    def __init__(self):
+        pass
+
+    def init_elmt(self, dim):
+        self.elmt = np.zeros((dim), dtype=int)
+
+    def set_elmt(self, val):
+        self.elmt = val
+
 
 class Mesh():
-    def __init__(self, path, fname, ngllx, nglly, ngllz, ngnode):
+    def __init__(self, path, fname, ngllx, nglly, ngllz, ngnode,
+                 ISDISP_DOF=True, ISPOT_DOF=True):
         self.path  = path
         self.fname = fname
-
 
         self.ndim = 3
         self.nndofu = 3
@@ -28,25 +41,26 @@ class Mesh():
         self.ngll = int(self.ngllx*self.nglly*self.ngllz)
         self.npoints = self.ngll*self.nelem
 
+        self.maxngll2d = copy(self.ngllxy)  # NEEDS PROPER IMPLEMENTATION
+                                            # if ngllx != nglly or ngllz
+
+        self.infbc = False
+        self.nondimensionalise = True
+
+        self.ISDISP_DOF = ISDISP_DOF
+        self.ISPOT_DOF = ISPOT_DOF
+
         self.nenode = copy(self.ngll) # This is the number of element nodes
                                       # where as self.nnode is the number of unique
                                       # nodes
 
-        self._calc_gll1D()
 
-        # Load mesh stuff:
-        self.g_num = np.loadtxt(f'{path}/{fname}_connectivity', skiprows=1, dtype=int)
-        self._load_coords()
-        self._load_free_surface()
-        self._load_mat_IDs()
-        self._load_mat_list()
-        self._load_BCs()
 
 
         # Initialise arrays:
-        self.massden = np.zeros((self.ngll, self.nelem))
-        self.shearmod = np.zeros((self.ngll, self.nelem))
-        self.bulkmod = np.zeros((self.ngll, self.nelem))
+        self.massden_elmt = np.zeros((self.ngll, self.nelem))
+        self.shearmod_elmt = np.zeros((self.ngll, self.nelem))
+        self.bulkmod_elmt = np.zeros((self.ngll, self.nelem))
 
 
 
@@ -90,7 +104,6 @@ class Mesh():
     def _load_mat_IDs(self):
         matid = np.loadtxt(f'{self.path}/{self.fname}_material_id', dtype=int)
         assert(matid[0]==self.nelem)
-
         self.matID = matid[1:]
 
 
@@ -103,7 +116,7 @@ class Mesh():
             for row in csv_reader:
                 if row[0][0] != '#':
                     if ctr ==0:
-                        self.nmaterials = int(row[0])
+                        self.nmatblk = int(row[0])
                     else:
                         materials.append(row)
                     ctr +=1
@@ -167,7 +180,7 @@ class Mesh():
 
 
 
-    def initialise_dof(self, ISDISP_DOF=True, ISPOT_DOF=True):
+    def initialise_dof(self):
         # Takes in a mesh object
         # Sets the number of DofF and IDs of the nodal DofF
 
@@ -183,7 +196,7 @@ class Mesh():
         idofphi = np.zeros(1, dtype=int)
 
         # Displacement DOF:
-        if ISDISP_DOF:
+        if self.ISDISP_DOF:
             nndof += self.nndofu               # Add 3 for disp.
             nedofu = self.nndofu * self.nenode # Elemental DOF disp = number of GLL * 3 (per element)
                                           # E.g. 81 if 3 gll in each direction x 3 disp. directions
@@ -200,7 +213,7 @@ class Mesh():
 
         idof = idofu[self.nndofu - 1]
 
-        if ISPOT_DOF:
+        if self.ISPOT_DOF:
             nndof   += self.nndofphi
             nedofphi = self.nndofphi * self.nenode
             nedof   +=  nedofphi
@@ -225,13 +238,13 @@ class Mesh():
 
 
 
-    def set_element_dof(self, ISDISP_DOF=True, ISPOT_DOF=True):
+    def set_element_dof(self):
         # Sets IDs for the element level DOF for U and Phi so we can map the element
         # matrices
 
         self.edofu[:] = -9999
 
-        if ISPOT_DOF:
+        if self.ISPOT_DOF:
             self.edofphi[:] = -9999
 
         iu0   = 0
@@ -241,7 +254,7 @@ class Mesh():
         iu = np.zeros(self.nndofu, dtype=int) # SOME KIND OF ARRAY
 
         for i in range(self.ngll):
-            if ISDISP_DOF:
+            if self.ISDISP_DOF:
                 iu[0] = iu0 + 1
                 nu += 1
                 self.edofu[nu-1] = iu[0]
@@ -257,7 +270,7 @@ class Mesh():
                 iphi0 = iu[self.nndofu-1]
 
 
-            if ISPOT_DOF:
+            if self.ISPOT_DOF:
                 iphi = iphi0 + 1
                 self.edofphi[i] = iphi
 
@@ -767,11 +780,6 @@ class Mesh():
                     gll_weights[n] = self.gllwx[i] * self.gllwy[j] * self.gllwz[k]
 
 
-        i_ind = {0: [0, 0, 0],
-                 1: [1, 0, 0],
-                 2: [2, 0, 0],
-                 }
-
 
         # need to make an indexing array:
         we_ind = np.zeros((self.ngll, 3), dtype=int)
@@ -800,12 +808,6 @@ class Mesh():
             # Calculating derivative lagrange values at each point
             # Also first line saves the lagrange_gll value as the product
             # of the above arrays:
-
-
-
-
-
-
             n = -1
             for k in range(self.ngllz):
                 for j in range(self.nglly):
@@ -825,6 +827,429 @@ class Mesh():
         self.gll_weights    = gll_weights
         self.lagrange_gll   = lagrange_gll
         self.gll_points     = gll_points
-        self.lagrange_x     = lagrange_x
-        self.lagrange_y     = lagrange_y
-        self.lagrange_z     = lagrange_z
+        #self.lagrange_x     = lagrange_x
+        #self.lagrange_y     = lagrange_y
+        #self.lagrange_z     = lagrange_z
+
+
+
+    def prepare_integration2d(self):
+
+        # allocate:
+        #   Derivatives of shape functions (3D):
+        self.dshape_quad4_xy = np.zeros((2, 4, self.ngllxy))
+        self.dshape_quad4_yz = np.zeros((2, 4, self.ngllyz))
+        self.dshape_quad4_zx = np.zeros((2, 4, self.ngllzx))
+
+        #   XY stuff:
+        self.gll_weights_xy, self.gll_points_xy, self.lagrange_gll_xy, self.dlagrange_gll_xy = \
+            self._allocator_gll_factory(self.ngllxy)
+        #   YZ stuff:
+        self.gll_weights_yz, self.gll_points_yz, self.lagrange_gll_yz, self.dlagrange_gll_yz = \
+            self._allocator_gll_factory(self.ngllyz)
+        #   ZX stuff:
+        self.gll_weights_zx, self.gll_points_zx, self.lagrange_gll_zx, self.dlagrange_gll_zx = \
+            self._allocator_gll_factory(self.ngllzx)
+
+
+        # Create the derivative shape functions QUAD4 for XY, YZ, ZX
+        self._dshape_function_quad4_factory('xy')
+        self._dshape_function_quad4_factory('yz')
+        self._dshape_function_quad4_factory('zx')
+
+        # Now calculate 2D quadrature for each direction:
+        #   XY:
+        self._gll_quadrature2d(self.ngllx, self.nglly, self.ngllxy, self.gll_points_xy, self.gll_weights_xy,
+                               self.lagrange_gll_xy, self.dlagrange_gll_xy)
+        #   YZ:
+        self._gll_quadrature2d(self.nglly, self.ngllz, self.ngllyz, self.gll_points_yz, self.gll_weights_yz,
+                               self.lagrange_gll_yz, self.dlagrange_gll_yz)
+        #   ZX:
+        self._gll_quadrature2d(self.ngllz, self.ngllx, self.ngllzx, self.gll_points_zx, self.gll_weights_zx,
+                               self.lagrange_gll_zx, self.dlagrange_gll_zx)
+
+        print("Finished preparing integration 2D.")
+
+
+
+    def _gll_quadrature2d(self, ngllx, nglly, ngll, gll_points2d, gll_weights2d, lagrange_gll2d, dlagrange_gll2d):
+        # Allocate:
+        lagrange_x = np.zeros(self.ngllx)
+        lagrange_y = np.zeros(self.nglly)
+
+        dlx = lagrange1st(self.ngllx - 1)
+
+
+        n = -1
+        for j in range(nglly):
+            for i in range(ngllx):
+                n += 1
+
+                gll_points2d[0, n] = self.gllpx[i]
+                gll_points2d[1, n] = self.gllpy[j]
+
+                gll_weights2d[n]   = self.gllwx[i] * self.gllwy[j]
+
+
+        # need to make an indexing array for use below:
+        we_ind = np.zeros((self.ngll, 2), dtype=int)
+        wectr = 0
+        for j in range(self.nglly):
+            for i in range(self.ngllx):
+                we_ind[wectr, 0] = i
+                we_ind[wectr, 1] = j
+                wectr += 1
+
+
+        # Get the 2D lagrange and derivatives on face:
+        for ii in range(ngll):
+            xi  = gll_points2d[0,ii]
+            eta = gll_points2d[1,ii]
+
+
+            # Calculating lagrange values at each point
+            for i in range(self.ngllx):
+                lagrange_x[i] = lagrange(N=self.ngllx-1, i=i-1, x=xi)
+            for i in range(self.nglly):
+                lagrange_y[i] = lagrange(N=self.nglly-1, i=i-1, x=eta)
+
+
+            # Calculating derivative lagrange values at each point
+            # Also first line saves the lagrange_gll value as the product
+            # of the above arrays:
+            n = -1
+            for j in range(self.nglly):
+                for i in range(self.ngllx):
+                    n+=1
+
+                    # Store lagrange value:
+                    lagrange_gll2d[ii, n] = lagrange_x[i] * lagrange_y[j]
+
+                    dlagrange_gll2d[0,ii,n] = dlx[:, we_ind[ii,:][0]][i] * lagrange_y[j]
+                    dlagrange_gll2d[1,ii,n] = lagrange_x[i] * dlx[:, we_ind[ii,:][1]][j]
+
+
+
+    def _dshape_function_quad4_factory(self, plane):
+        # Determine which plane:
+        if plane == 'xy':
+             ngllx         = copy(self.ngllx)
+             nglly         = copy(self.ngllx)
+             xigll         = copy(self.gllpx)
+             etagll        = copy(self.gllpy)
+             dshape_quad4  = self.dshape_quad4_xy
+        elif plane == 'yz':
+             ngllx         = copy(self.nglly)
+             nglly         = copy(self.ngllz)
+             xigll         = copy(self.gllpy)
+             etagll        = copy(self.gllpz)
+             dshape_quad4  = self.dshape_quad4_yz
+        elif plane == 'zx':
+             ngllx         = copy(self.ngllz)
+             nglly         = copy(self.ngllx)
+             xigll         = copy(self.gllpz)
+             etagll        = copy(self.gllpx)
+             dshape_quad4  = self.dshape_quad4_zx
+        else:
+            raise ValueError("Must be xy, yz, zx")
+
+
+        # Now we can call to the actual function:
+        self._dshape_function_quad4(ngllx, nglly, xigll, etagll, dshape_quad4)
+
+
+
+
+    def _dshape_function_quad4(self, ngllx, nglly, xigll, etagll, dshape_quad4):
+        one = 1.0000000
+        one_fourth = 0.25000000
+        local_ngll = ngllx * nglly
+
+        # Compute derivatives of 2D shape functions:
+        igll = -1
+        for j in range(nglly):
+            etap = one + etagll[j]
+            etam = one - etagll[j]
+            for i in range(ngllx):
+                igll += 1
+                xip = one + xigll[i]
+                xim = one - xigll[i]
+                dshape_quad4[0,0,igll] = -one_fourth*etam
+                dshape_quad4[0,1,igll] = one_fourth*etam
+                dshape_quad4[0,2,igll] = one_fourth*etap
+                dshape_quad4[0,3,igll] = -one_fourth*etap
+                dshape_quad4[1,0,igll] = -one_fourth*xim
+                dshape_quad4[1,1,igll] = -one_fourth*xip
+                dshape_quad4[1,2,igll] = one_fourth*xip
+                dshape_quad4[1,3,igll] = one_fourth*xim
+
+
+
+    def _allocator_gll_factory(self, d):
+        gll_weights    = np.zeros(d)
+        gll_points     = np.zeros((2, d))
+        lagrange_gll   = np.zeros((d, d))
+        d_lagrange_gll = np.zeros((2, d, d))
+        return gll_weights, gll_points, lagrange_gll, d_lagrange_gll
+
+
+
+    def set_model_properties(self):
+        print('Set_model_properties currently does not support parallel (ghosts) or infinite elements')
+        # allocate
+        ielmts = np.zeros(self.nmatblk, dtype=int)
+        num = np.zeros(self.ngll)
+        block_nelmt = np.zeros(self.nmatblk, dtype=int)
+
+        # loop through each material block:
+        for i_blk in range(self.nmatblk):
+            block_nelmt[i_blk] = len(self.matID[self.matID == i_blk+1])
+
+        # Now create a list of length nmatblok  with a material_block object in each element
+        block = []
+        for j in range(self.nmatblk):
+            block.append(Material_Block())
+            # Now allocate the elmt of each Material Block object in the listL
+            block[j].init_elmt(dim=block_nelmt[j])
+
+
+        for i in range(self.nelem):
+            iblk = self.matID[i]
+            ielmts[iblk-1] += 1
+            block[iblk-1].elmt[ielmts[iblk-1]-1] = i
+
+        # Now each of the Material_block objects in 'block' has its elmt array
+        # defined - these arrays hold the IDs of each spectral element that
+        # belong to that material. E.g. if we have 2 materials with 4 elements of material 1
+        # and 3 of material 2 then block is a list with 2 MaterialBlock objects. The first of these
+        # objects has an elmt of length 4 and the second has an elmt of length 2 where the values in those
+        # arrays are the element IDs.
+
+        # Now convert block model to pointwise model
+        self._convert_block_to_point_model(block)
+
+
+    def _convert_block_to_point_model(self, block):
+        # Need to consider each material that is defined which is in the matfile with the following:
+        # Simplified version of original code where I have just done the bits I need.
+        # materialID, domainID, type, γ, E, ν, φ, c, ψ
+        #   domainID  - elastic = 1 or viscoelastic = 11
+        #   type      - material structure -  0 = homogenous
+        #                                  - -1 = tomographic
+
+        # Currently only supporting homogenous for which the 6 params above are defined:
+        #       γ   - weight [kN/m^3]              E   - Youngs Modulus [kN/m^2]
+        #       ν   - poissons?                    φ   - angle of internal friction [deg]
+        #       c   - cohesion [kN/m^2]            ψ   - angle of dilation [deg]
+        for i_blk in range(self.nmatblk):
+            material = self.materials[i_blk]
+            id       = int(material[0])
+            domain   = int(material[1])
+            type     = int(material[2])
+            weight   = float(material[3])
+            youngmod = float(material[4])
+            poissons = float(material[5])
+
+
+            # calculate from inputs
+            density  = 1000 * weight / g_acc #[kg/m^3]
+            shearmod = youngmod/(2*(1+poissons))
+            bulkmod  = youngmod/(3*(1 - 2*poissons))
+
+
+            if type == 0:
+                # Homogenous material
+                if self.ISDISP_DOF:
+                    self.bulkmod_elmt[:, list(block[i_blk].elmt) ]  = bulkmod
+                    self.shearmod_elmt[:, list(block[i_blk].elmt) ] = shearmod
+
+                # need density if doing gravity or disp.
+                if self.ISDISP_DOF or self.ISPOT_DOF:
+                    self.massden_elmt[:, list(block[i_blk].elmt)] = density
+
+
+        print("NEED TO TEST THAT CALCULATED BULK/SHEAR/DENSITY are correct.")
+
+
+
+
+    def set_nondimensional_params(self):
+
+        # DENSITY
+        if self.infbc:
+            raise ValueError('Not implemented currently. ')
+        else:
+            self.mindensity = np.min(self.massden_elmt.flatten())
+            self.maxdensity = np.max(self.massden_elmt.flatten())
+        # Always use positive value for nondimensionalizing
+        self.maxdensity = np.max(np.array([np.abs(self.mindensity), np.abs(self.maxdensity)]))
+        #print("Minimum density: ", self.mindensity)
+        #print("Maximum density: ", self.maxdensity)
+
+        # BULK MODULUS
+        if self.infbc:
+            raise ValueError('Not implemented currently. ')
+        else:
+            self.minbulkmod = np.min(self.bulkmod_elmt.flatten())
+            self.maxbulkmod = np.max(self.bulkmod_elmt.flatten())
+        # Always use positive value for nondimensionalizing
+        self.maxbulkmod = np.max(np.array([np.abs(self.minbulkmod), np.abs(self.maxbulkmod)]))
+        #print("Minimum kappa:   ", self.minbulkmod)
+        #print("Maximum kappa:   ", self.maxbulkmod)
+
+        # SHEAR MODULUS
+        if self.infbc:
+            raise ValueError('Not implemented currently. ')
+        else:
+            self.minshearmod = np.min(self.shearmod_elmt.flatten())
+            self.maxshearmod = np.max(self.shearmod_elmt.flatten())
+        # Always use positive value for nondimensionalizing
+        self.maxshearmod = np.max(np.array([np.abs(self.minshearmod), np.abs(self.maxshearmod)]))
+        #print("Minimum shear:   ", self.minshearmod)
+        #print("Maximum shear:   ", self.maxshearmod)
+
+
+    def calc_nondimensionalisation_vals(self):
+
+        if self.nondimensionalise:
+            # density
+            self.dim_density     = copy(self.maxdensity)
+            self.nondim_density  = 1.0 / self.dim_density
+
+            # length scale (coords)
+            self.dim_L           = self.absmaxcoord
+            self.nondim_L        = 1.0 / self.dim_L
+
+            # time? traction?
+            self.nondim_T         = np.sqrt(np.pi * GRAV_CONS * self.dim_density)
+
+            # velocity/acceleration
+            self.dim_vel          = self.dim_L * self.nondim_T
+            self.dim_accel        = self.dim_vel * self.nondim_T
+            self.nondim_accel     = 1.0/self.dim_vel
+            self.dim_m            = self.maxdensity * self.dim_L * self.dim_L * self.dim_L
+
+            self.dim_mod          = self.dim_m * self.nondim_L * self.nondim_T * self.nondim_T
+            self.nondim_mod       = 1.0/self.dim_mod
+
+            self.dim_mtens        = self.dim_density * (self.dim_L**5) * self.nondim_T * self.nondim_T
+            self.nondim_mtens     = 1.0/self.dim_mtens
+
+            self.dim_gpot         = np.pi * GRAV_CONS * self.maxdensity * self.dim_L * self.dim_L
+            self.dim_G            = np.pi * GRAV_CONS * self.maxdensity * self.dim_L
+        else:
+            # retain dimensional values
+            self.dim_density         = 1.0
+            self.nondim_density      = 1.0
+            self.dim_L               = 1.0
+            self.nondim_L            = 1.0
+            self.nondim_T            = 1.0
+            self.dim_vel             = 1.0
+            self.dim_accel           = 1.0
+            self.nondim_accel        = 1.0
+            self.dim_m               = 1.0
+            self.dim_mod             = 1.0
+            self.nondim_mod          = 1.0
+            self.dim_mtens           = 1.0
+            self.nondim_mtens        = 1.0
+            self.dim_gpot            = 1.0
+            self.dim_G               = 1.0
+
+
+
+    def calc_model_coord_extents(self):
+
+        if self.infbc:
+            raise ValueError("INFBC not implemented yet for calc_model_coords_extents")
+        else:
+            self.model_minx = np.min(self.g_coord[0,:])
+            self.model_miny = np.min(self.g_coord[1,:])
+            self.model_minz = np.min(self.g_coord[2,:])
+
+            self.model_maxx = np.max(self.g_coord[0, :])
+            self.model_maxy = np.max(self.g_coord[1, :])
+            self.model_maxz = np.max(self.g_coord[2, :])
+
+            self.mincoord   = np.min(np.array([self.model_minx, self.model_miny, self.model_minz]))
+            self.maxcoord   = np.max(np.array([self.model_maxx, self.model_maxy, self.model_maxz]))
+
+            self.absmaxx    = np.max(np.abs(self.g_coord[0,:]))
+            self.absmaxy    = np.max(np.abs(self.g_coord[1,:]))
+            self.absmaxz    = np.max(np.abs(self.g_coord[2,:]))
+            self.absmaxcoord= np.max(np.array([self.absmaxx, self.absmaxy, self.absmaxz]))
+
+
+    def apply_nondimensionalisation(self):
+            self.g_coord = self.g_coord*self.nondim_L
+
+            if self.ISDISP_DOF:
+                self.massden_elmt  = self.massden_elmt  * self.nondim_density
+                self.bulkmod_elmt  = self.bulkmod_elmt  * self.nondim_mod
+                self.shearmod_elmt = self.shearmod_elmt * self.nondim_mod
+
+
+    def read_input(self):
+        # Load mesh stuff:
+        self.g_num = np.loadtxt(f'{self.path}/{self.fname}_connectivity', skiprows=1, dtype=int)
+        self._load_coords()
+        self._load_free_surface()
+        self._load_mat_IDs()
+        self._load_mat_list()
+        self._load_BCs()
+
+
+
+    def prepare_free_surface(self):
+        # Reads information from free surface file
+        # must be called AFTER the spectral elements have been created
+
+        # Read first line (number of elements in free surface set)
+        self.nelmt_fs = int(self._read_desired_line( file=f'{self.path}/{self.fname}_free_surface', line=0)[0][0])
+
+        # total poss number of nodes on free surface
+        # we havent defined maxngll2d - pretty straight forward since this
+        # currently only works when ngllx = nglly = ngllz
+        nsnode_all = self.nelmt_fs * self.maxngll2d
+
+        # Allocate arrays with correct dimension
+        iface_fs    = np.zeros(self.nelmt_fs)
+        gnum4_fs    = np.zeros((4, self.nelmt_fs))
+        gnum_fs     = np.zeros((self.maxngll2d, self.nelmt_fs))
+        nodelist    = np.zeros(nsnode_all)
+        inode_order = np.zeros(nsnode_all)
+
+
+        # Read all free surface values from file:
+        fs_vals = np.loadtxt(f'{self.path}/{self.fname}_free_surface', skiprows=1).astype(int)
+
+        iface_fs[:] = fs_vals[:,1]
+
+        for i_face in range(self.nelmt_fs):
+            num = self.g_num[:, fs_vals[i_face-1, 0] -1 ]
+
+            mask = list(self.hexface[fs_vals[i_face-1, 1]-1].gnode)
+            # I think each mask value needs a -1
+            for m in range(len(mask)):
+                mask[m] = mask[m] -1
+            gnum4_fs[:, i_face] = num[mask]
+
+            # This mask uses node instead of gnode
+            mask = list(self.hexface[fs_vals[i_face - 1, 1] - 1].node)
+            # I think each mask value needs a -1
+            for m in range(len(mask)):
+                mask[m] = mask[m] - 1
+            gnum_fs[:, i_face] = num[mask]
+
+            print("PREPARE FREE SURFACE ABOVE HERE NEEDS TESTING!!! ")
+
+
+
+
+
+    def _read_desired_line(self, file, line):
+        desired = [line]
+        with open(file, 'r') as fin:
+            reader = csv.reader(fin)
+            out_line = [[s for s in row] for i, row in enumerate(reader) if i in desired]
+        fin.close()
+        return out_line
