@@ -1253,8 +1253,6 @@ class Mesh():
         self.gnum_fs     = np.zeros((self.maxngll2d, self.nelmt_fs), dtype=int)
         self.nodelist    = np.zeros(nsnode_all, dtype=int)
 
-        print("PREPARE FREE SURFACE ABOVE HERE NEEDS TESTING!!! ")
-
         # Read all free surface values from file:
         fs_vals = np.loadtxt(f'{self.path}/{self.fname}_free_surface', skiprows=1).astype(int)
 
@@ -1302,17 +1300,11 @@ class Mesh():
                 isnode[ind] = True
                 self.gnode_fs[ind] = self.nodelist[i]
 
-
-
         n1 = 1
         n2 = self.maxngll2d
         self.rgnum_fs = np.zeros((self.maxngll2d, self.nelmt_fs))
 
         for i_face in range(self.nelmt_fs):
-            print('iface = ', i_face+1)
-            print('   n1 = ', n1)
-            print('   n2 = ', n2)
-            print('   inode_order[n1-1:n2] = ', inode_order[n1-1:n2])
             self.rgnum_fs[:,i_face] = inode_order[n1-1:n2]
 
             n1 = n2 + 1
