@@ -1029,7 +1029,7 @@ class Mesh():
         self._convert_block_to_point_model(block)
 
 
-    def _convert_block_to_point_model(self, block):
+    def _convert_block_to_point_model(self, block, isdensity=True):
         # Need to consider each material that is defined which is in the matfile with the following:
         # Simplified version of original code where I have just done the bits I need.
         # materialID, domainID, type, γ, E, ν, φ, c, ψ
@@ -1041,31 +1041,67 @@ class Mesh():
         #       γ   - weight [kN/m^3]              E   - Youngs Modulus [kN/m^2]
         #       ν   - poissons?                    φ   - angle of internal friction [deg]
         #       c   - cohesion [kN/m^2]            ψ   - angle of dilation [deg]
+
+        self.mat_domain = np.zeros(self.nmatblk, dtype=int)
+        self.type_blk = np.zeros(self.nmatblk, dtype=int)
+        self.bulkmod_blk = np.zeros(self.nmatblk)
+        self.shearmod_blk = np.zeros(self.nmatblk)
+        self.rho_blk = np.zeros(self.nmatblk)
+        self.gam_blk = np.zeros(self.nmatblk)
+        self.ym_blk = np.zeros(self.nmatblk)
+        self.nu_blk = np.zeros(self.nmatblk)
+        self.phi_blk = np.zeros(self.nmatblk)
+        self.coh_blk = np.zeros(self.nmatblk)
+        self.psi_blk = np.zeros(self.nmatblk)
+        self.isempty_blk = np.zeros(self.nmatblk, dtype=bool)
+        self.ismat = np.zeros(self.nmatblk, dtype=bool) # All false
+
+        # For each material
         for i_blk in range(self.nmatblk):
             material = self.materials[i_blk]
-            id       = int(material[0])
-            domain   = int(material[1])
-            type     = int(material[2])
-            weight   = float(material[3])
-            youngmod = float(material[4])
-            poissons = float(material[5])
+            imat       = int(material[0]) - 1 # for py indexing
+
+            self.mat_domain[imat] = int(material[1])
+            self.type_blk[imat]   = int(material[2])
+
+            if self.type_blk[imat]  == 0 :
+                # Block model (homogenous)
+                # Defining density based params.
+                if isdensity:
+                    self.rho_blk[imat] = float(material[3])
+                    self.gam_blk[imat] = self.rho_blk[imat]*g_acc
+                else:
+                    self.gam_blk[imat] = float(material[3])
+                    self.rho_blk[imat] = self.gam_blk[imat]/g_acc
+
+            self.ym_blk[imat] = float(material[4])
+            self.nu_blk[imat] = float(material[5])
+            self.phi_blk[imat] = float(material[6])
+            self.coh_blk[imat] = float(material[7])
+            self.psi_blk[imat] = float(material[8])
 
 
-            # calculate from inputs
-            density  = 1000 * weight / g_acc #[kg/m^3]
-            shearmod = youngmod/(2*(1+poissons))
-            bulkmod  = youngmod/(3*(1 - 2*poissons))
+            # Calculate shear/bulk modulus:
+            self.bulkmod_blk[imat] = self.ym_blk[imat]/(3*(1 - 2*self.nu_blk[imat]))
+            self.shearmod_blk[imat] = 0.5 * self.ym_blk[imat]/(1 + self.nu_blk[imat])
 
 
-            if type == 0:
-                # Homogenous material
-                if self.ISDISP_DOF:
-                    self.bulkmod_elmt[:, list(block[i_blk].elmt) ]  = bulkmod
-                    self.shearmod_elmt[:, list(block[i_blk].elmt) ] = shearmod
 
-                # need density if doing gravity or disp.
-                if self.ISDISP_DOF or self.ISPOT_DOF:
-                    self.massden_elmt[:, list(block[i_blk].elmt)] = density
+            # Checking if 0 values:
+            if np.logical_and(self.rho_blk[imat]==0, self.ym_blk[imat]==0):
+                self.isempty_blk[imat] = True
+
+            self.ismat[imat] = True
+
+
+            # Homogenous material
+            if self.ISDISP_DOF:
+                self.bulkmod_elmt[:, list(block[i_blk].elmt) ]  = self.bulkmod_blk[imat]
+                self.shearmod_elmt[:, list(block[i_blk].elmt) ] = self.shearmod_blk[imat]
+
+            # need density if doing gravity or disp.
+            if self.ISDISP_DOF or self.ISPOT_DOF:
+                self.massden_elmt[:, list(block[i_blk].elmt)] = self.rho_blk[imat]
 
 
         print("NEED TO TEST THAT CALCULATED BULK/SHEAR/DENSITY are correct.")
@@ -1284,6 +1320,56 @@ class Mesh():
 
 
 
+    def compute_max_elementsize(self):
+        # Must be called before converting HEX8 --> spectral elemenets
+        maxsize = 0.
+
+        for i_elmt in range(self.nelem):
+            mdomain = self.mat_domain[self.matID[i_elmt]-1]
+
+            # Doenst include transition.infinite elements
+            if np.logical_or(mdomain == 1, mdomain == 11):
+                num = self.g_num[self.hex8_gnode-1 , i_elmt]
+                x1 = self.g_coord[:, num[0] - 1]
+                x2 = self.g_coord[:, num[1] - 1]
+                x3 = self.g_coord[:, num[2] - 1]
+                x4 = self.g_coord[:, num[3] - 1]
+                x5 = self.g_coord[:, num[4] - 1]
+                x6 = self.g_coord[:, num[5] - 1]
+                x7 = self.g_coord[:, num[6] - 1]
+                x8 = self.g_coord[:, num[7] - 1]
+
+                d1 = self._distance(x1, x7)
+                d2 = self._distance(x2, x8)
+                d3 = self._distance(x3, x5)
+                d4 = self._distance(x4, x6)
+
+                maxdiag = np.max(np.array([d1, d2, d3, d4]))
+
+                # Replace max size if bigger
+                if maxdiag > maxsize:
+                    maxsize = copy(maxdiag)
+
+            else:
+                print('Skipping elements as are infinite or transitional.')
+
+        self.maxsize_elmt = maxsize
+        self.sqmaxsize_elmt = maxsize**2
+
+
+    def _distance(self, a1, a2):
+        assert(len(a1) == len(a2))
+
+        a1 = np.array(a1)
+        a2 = np.array(a2)
+
+        adiff = np.square(a1-a2)
+        return (np.sum(adiff))**0.5
+
+
+    def determine_solver(self):
+        print('We dont exactly have an abundance of solvers rn...!')
+
     def _i_uniinv(self, arr):
         # This function is a really long gross function in the math_library.f90
         # Essentially what it is doing is taking in an array and counting up
@@ -1310,3 +1396,4 @@ class Mesh():
             out_line = [[s for s in row] for i, row in enumerate(reader) if i in desired]
         fin.close()
         return out_line
+

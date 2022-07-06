@@ -48,5 +48,6 @@ m.prepare_free_surface()
 
 m.apply_nondimensionalisation()
 
+m.compute_max_elementsize()
 
-# NEXT UP CALCULATE call compute_max_elementsize()
+m.determine_solver()
