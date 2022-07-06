@@ -1212,39 +1212,96 @@ class Mesh():
         nsnode_all = self.nelmt_fs * self.maxngll2d
 
         # Allocate arrays with correct dimension
-        iface_fs    = np.zeros(self.nelmt_fs)
-        gnum4_fs    = np.zeros((4, self.nelmt_fs))
-        gnum_fs     = np.zeros((self.maxngll2d, self.nelmt_fs))
-        nodelist    = np.zeros(nsnode_all)
-        inode_order = np.zeros(nsnode_all)
+        self.iface_fs    = np.zeros(self.nelmt_fs, dtype=int)
+        self.gnum4_fs    = np.zeros((4, self.nelmt_fs), dtype=int)
+        self.gnum_fs     = np.zeros((self.maxngll2d, self.nelmt_fs), dtype=int)
+        self.nodelist    = np.zeros(nsnode_all, dtype=int)
 
+        print("PREPARE FREE SURFACE ABOVE HERE NEEDS TESTING!!! ")
 
         # Read all free surface values from file:
         fs_vals = np.loadtxt(f'{self.path}/{self.fname}_free_surface', skiprows=1).astype(int)
 
-        iface_fs[:] = fs_vals[:,1]
+        self.iface_fs[:] = fs_vals[:,1]
+
+        n1 = 1
+        n2 = self.maxngll2d
 
         for i_face in range(self.nelmt_fs):
-            num = self.g_num[:, fs_vals[i_face-1, 0] -1 ]
+            num = copy(self.g_num[:, fs_vals[i_face, 0]-1])
+            mask = list(self.hexface[fs_vals[i_face, 1]-1].gnode -1)
+            self.gnum4_fs[:, i_face] = copy(num[mask])
 
-            mask = list(self.hexface[fs_vals[i_face-1, 1]-1].gnode)
-            # I think each mask value needs a -1
-            for m in range(len(mask)):
-                mask[m] = mask[m] -1
-            gnum4_fs[:, i_face] = num[mask]
+            mask = list(self.hexface[fs_vals[i_face, 1] - 1].node - 1)
+            self.gnum_fs[:, i_face] = copy(num[mask])
 
-            # This mask uses node instead of gnode
-            mask = list(self.hexface[fs_vals[i_face - 1, 1] - 1].node)
-            # I think each mask value needs a -1
-            for m in range(len(mask)):
-                mask[m] = mask[m] - 1
-            gnum_fs[:, i_face] = num[mask]
 
-            print("PREPARE FREE SURFACE ABOVE HERE NEEDS TESTING!!! ")
+            self.nodelist[n1-1:n2] = copy(num[mask])
+            n1 = n2 + 1
+            n2 = n1 + self.maxngll2d - 1
+
+        # Renumber Free Surface connectivity
+        inode_order = self._i_uniinv(self.nodelist)
 
 
 
 
+        self.nnode_fs = np.max(inode_order)
+
+        isnode = np.zeros(self.nnode_fs, dtype=bool)
+
+        # Store global node IDs for free surface nodes
+        self.gnode_fs = np.zeros(self.nnode_fs, dtype=int)
+
+        self.gnode_fs[inode_order[0]-1] = self.nodelist[0]
+
+        isnode[inode_order[0]-1]        = True
+
+
+        for i in range(1, nsnode_all):
+
+            ind = inode_order[i]-1
+
+            if not isnode[ind]:
+                isnode[ind] = True
+                self.gnode_fs[ind] = self.nodelist[i]
+
+
+
+        n1 = 1
+        n2 = self.maxngll2d
+        self.rgnum_fs = np.zeros((self.maxngll2d, self.nelmt_fs))
+
+        for i_face in range(self.nelmt_fs):
+            print('iface = ', i_face+1)
+            print('   n1 = ', n1)
+            print('   n2 = ', n2)
+            print('   inode_order[n1-1:n2] = ', inode_order[n1-1:n2])
+            self.rgnum_fs[:,i_face] = inode_order[n1-1:n2]
+
+            n1 = n2 + 1
+            n2 = n1 + self.maxngll2d - 1
+
+
+
+    def _i_uniinv(self, arr):
+        # This function is a really long gross function in the math_library.f90
+        # Essentially what it is doing is taking in an array and counting up
+        # how many elements in the array are <= that element value
+        # duplicate values are only counted once.
+
+        len_arr = len(arr)
+        new_arr = np.zeros(len_arr, dtype=int)
+
+        # My alternative method:
+        # 1) Create a seperate array with all the unique elements:
+        uniq = np.unique(arr)
+
+        # 2) Loop through original array values and get <= count from uniq:
+        for i in range(len_arr):
+            new_arr[i] = len(uniq[uniq<= arr[i] ])
+
+        return new_arr
 
     def _read_desired_line(self, file, line):
         desired = [line]
