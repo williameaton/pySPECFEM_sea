@@ -1,4 +1,14 @@
 import numpy as np
+from copy import copy
+
+
+def d(i, j):
+    # kronecker delta
+    if i == j:
+        return 1
+    else:
+        return 0
+
 
 class SPECFEM3D():
 
@@ -60,7 +70,17 @@ class SPECFEM3D():
 
 
         # Compute the mass matrix:
-        self._compute_mass_elastic_WE()
+        self._calc_jacobian()
+
+        self._compute_mass_elastic_global_WE()
+
+        self._calc_solid_u_phi_coupling()
+        self._calc_solid_phi_u_coupling()
+
+
+        # Compute BLF T1:
+        #self._compute_BLF_T1()
+        #print()
 
     def _calc_relaxation_time(self):
         # currently not implemented:
@@ -278,7 +298,8 @@ class SPECFEM3D():
 
         # Storage for mass matrix
         self.storemmat          = np.zeros((self.m.nedof, self.m.nelem))
-
+        self.storemmat_global   = np.zeros(self.m.nnode)
+        self.storemmat_global2   = np.zeros(self.m.nnode)
 
     def _allocate_inbuild_preconditioner(self):
 
@@ -293,38 +314,179 @@ class SPECFEM3D():
 
 
 
+    def _compute_BLF_T1(self):
+        # create matrix:
+        self.blf_t1 = np.zeros((self.m.nedof , self.m.nelem))
 
-    def _compute_mass_elastic_WE(self):
-        # Our mass matrix is a sum over (1) gll pts (2) deg. of freedom (3 for disp)
-        # Each element of the sum over (1) and (2) is an element in the storemmat
-        # --> each eleemnt therefore holds a value which is a sum over j
-        # therefore for any element , e.g. the first element, storemmat[:,0],
-        # the order will be [gll1_x, gll1_y, gll1_z, gll2_x ..., gllN_z]
-        print(np.shape(self.storemmat))
 
+        for ielem in range(self.m.nelem): # need to sum over all eventually
+            n = 0
+            for igll in range(self.m.ngll):
+
+                kappa = self.m.bulkmod_elmt[igll, ielem]
+
+                for idof in range(self.m.nndofu):
+
+                        W = self.m.gll_weights[igll]
+
+
+                        # Calculate the jacobian
+                        num = self.m.g_num[:, ielem]
+                        coord = np.transpose(self.m.g_coord[:, num[self.m.hex8_gnode - 1] - 1])
+                        jacobian = np.matmul(self.m.dshape_hex8[:,:,igll], coord)
+                        detjac = np.linalg.det(jacobian)
+                        jacinv = np.linalg.inv(jacobian)
+
+
+                        elemconstants = W * detjac * kappa
+
+                        idofvariables = jacinv[idof,idof] * self.m.dlagrange_gll[idof, igll, igll]
+
+                        jsum = 0
+                        for j in range(3):
+                            jsum += jacinv[j,j] * self.m.dlagrange_gll[idof, j, j]
+
+
+                        self.blf_t1[n, ielem] = elemconstants * idofvariables * jsum
+                        n += 1
+
+        print()
+
+
+
+
+    def _compute_mass_elastic_global_WE(self):
         print(f"Computing mass matrix with {self.m.nndof} degrees of freedom.")
 
-        elem_ind = 0  # index from 0 to nelem
-        ind      = 0  # index from 0 to nndof - 1
-        gll_ind  = 0  # index from 0 to ngll -1
+        for elem_ind in range(self.m.nelem):
+            gll_ind = 0
 
-        # For single element:
-        for alpha in range(self.m.ngllx):
-            for beta in range(self.m.nglly):
-                for gamma in range(self.m.ngllz):
-                    for i in range(self.m.nndof):
-                        # The above loops basicallly make a sum over all
-                        # degrees of freedom in an element at the nodal level
-                        #self.storemmat[ind]
+            num = self.m.g_num[:, elem_ind]
 
-                        w     = self.m.gll_weights[gll_ind]                 # Product of weights
-                        kappa = self.m.bulkmod_elmt[gll_ind, elem_ind]      # Bulk modulus for element
+            for alpha in range(self.m.ngllx):
+                for beta in range(self.m.nglly):
+                    for gamma in range(self.m.ngllz):
 
-                        # NUM is the IDs of the element
-                        # Hex8Gnode is the corner values?
-                        # gcoords then gets the coordinates in gll space
-                        #   this is an 8 x 3 (3 coordinates for each corner node)
-                        # Coord is then just the transpose of this
+                        glob_node = num[gll_ind]
 
-                        ind += 1
-                    gll_ind += 1
+                        w = self.m.gll_weights[gll_ind]                 # Product of weights
+                        rho = self.m.massden_elmt[gll_ind, elem_ind]    # Density for element
+                        mass =  w * self.detjac[gll_ind, elem_ind] * rho
+
+                        self.storemmat_global[glob_node-1]  = self.storemmat_global[glob_node-1] + mass
+
+                        gll_ind += 1
+
+
+
+
+
+    def _calc_jacobian(self):
+
+        print(f"Computing Jacobian.")
+
+        # Initialise arrays:
+        self.jacobian = np.zeros((self.m.ndim, self.m.ndim, self.m.ngll, self.m.nelem)) # 3 x 3 for each gll of each element
+        self.detjac   = np.zeros((self.m.ngll, self.m.nelem))
+        self.jacinv   = np.zeros((self.m.ndim, self.m.ndim, self.m.ngll, self.m.nelem))
+
+        # Loop through elements:
+        for i_elem in range(self.m.nelem):
+
+            # Get element coordinates for the corner nodes, in XYZ space.
+            num = self.m.g_num[:, i_elem]
+            a = self.m.g_coord[:, num[self.m.hex8_gnode - 1] - 1]
+            coord = np.transpose(a)
+
+            for igll in range(self.m.ngll):
+
+                d = self.m.dshape_hex8[:,:,igll]
+                jacobian = np.matmul(d, coord)
+
+                self.jacobian[:,:, igll, i_elem]  =  jacobian[:,:]
+                self.detjac[igll, i_elem]         =  np.linalg.det(jacobian)
+                self.jacinv[:,:, igll, i_elem]    =  np.linalg.inv(jacobian)[:,:]
+
+        print()
+
+
+
+
+
+
+    def _calc_solid_u_phi_coupling(self):
+        # Term 3: For sum over solid elements we have:
+        # sum(e_solid) sum(nndof) sum(gll) rho pi_vol lambda_i phi_dot
+        # This will result in a coefficient matrix that is of dimension
+        # (nedof_u  x  nedof_phi )
+        # THIS MATRIX MULTIPLIES THE PHI VALUES
+
+        # Output matrix will be called H:
+        if self.m.nedofphi != 1:
+            Warning(f"Calculating solid phi coeff. matrix even tho self.m.nedofphi = {self.m.nedofphi}")
+
+        self.H = np.zeros((self.m.nelem, self.m.nedofu, self.m.ngll))
+
+        # loop through elements
+        for i_elem in range(self.m.nelem):
+            n = 0
+            for igll in range(self.m.ngll):         # loop through gll point:
+                for idof in range(self.m.nndofu):  # loop through degrees of freedom
+
+                    # Check if a solid and not in space (inf element)
+                    # - v. bad way of checking but suffices for  this example.
+                    if np.logical_and(self.m.shearmod_elmt[igll,i_elem] > 0,
+                                      self.m.massden_elmt[igll,i_elem]  > 0):
+
+                        rho = self.m.massden_elmt[igll,i_elem]
+                        weight = self.m.gll_weights[igll]
+                        jacw = self.detjac[igll, i_elem] * weight
+
+                        # produce deriv: an ngll x ndof array
+                        deriv = np.matmul(np.transpose(self.m.dlagrange_gll[:,igll,:]), self.jacinv[:,:, igll, i_elem] )
+
+                        d = deriv[igll, idof]
+
+                        self.H[i_elem, n, igll] = rho * jacw * d
+
+                        n += 1
+        print()
+
+
+
+    def _calc_solid_phi_u_coupling(self):
+        # Term 4: For sum over solid elements we have:
+        # sum(e_solid) sum(nndof) sum(gll) rho pi_vol lambda_i u_dot
+        # This will result in a coefficient matrix that is of dimension
+        # (nedof_phi  x  nedof_u )
+        # THIS MATRIX MULTIPLES THE U VALUES
+
+        # Output matrix will be called H:
+        if self.m.nedofphi != 1:
+            Warning(f"Calculating solid phi coeff. matrix even tho self.m.nedofphi = {self.m.nedofphi}")
+
+        # If phi is active then the dof for an element = ngll
+        self.G = np.zeros((self.m.nelem, self.m.ngll, self.m.nedofu))
+
+        # loop through elements
+        for i_elem in range(self.m.nelem):
+            n = 0
+            for idof in range(self.m.nndofu):           # loop through degrees of freedom
+                for igll in range(self.m.ngll):         # loop through gll point:
+
+                    # Check if a solid and not in space (inf element)
+                    if np.logical_and(self.m.shearmod_elmt[igll,i_elem] > 0,
+                                      self.m.massden_elmt[igll,i_elem]  > 0):
+
+                        rho = self.m.massden_elmt[igll,i_elem]
+                        weight = self.m.gll_weights[igll]
+                        jacw = self.detjac[igll, i_elem] * weight
+
+                        # produce deriv: an ngll x ndof array
+                        deriv = np.matmul(np.transpose(self.m.dlagrange_gll[:,igll,:]), self.jacinv[:,:, igll, i_elem] )
+
+                        # This is the transpose of the H matrix
+                        self.G[i_elem, igll, n] = rho * jacw * deriv[igll, idof]
+
+                        n += 1
+        print()

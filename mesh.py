@@ -429,7 +429,7 @@ class Mesh():
                     for i_gnod in range(0, self.ngnod):
                         sum_shape += self.shape_hex8[i_gnod, i,j,k]
 
-                    if np.abs(sum_shape)-1 > 1e-20:
+                    if np.abs(sum_shape)-1 > 1e-10:
                         raise ValueError("Shape functions larger than tolerance")
 
 
@@ -827,9 +827,7 @@ class Mesh():
         self.gll_weights    = gll_weights
         self.lagrange_gll   = lagrange_gll
         self.gll_points     = gll_points
-        #self.lagrange_x     = lagrange_x
-        #self.lagrange_y     = lagrange_y
-        #self.lagrange_z     = lagrange_z
+
 
 
 
