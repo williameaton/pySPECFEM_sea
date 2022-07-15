@@ -13,6 +13,12 @@ num_materials = 1 # should be loaded from file.
 input_path = 'dummy_input/input'
 fname = 'block'
 
+
+print()
+print("*******************************************************************************************************")
+print("                             CREATING MESH FOR SPECFEMX (PYTHON TEMP)                                  ")
+print("*******************************************************************************************************")
+
 # Read input:
 m = Mesh(input_path, fname, ngllx, nglly, ngllz, ngnode,
          ISPOT_DOF=False)
@@ -55,5 +61,6 @@ m.determine_solver()
 
 print("Create SPECFEM3D object")
 s = SPECFEM3D(m)
+
 
 s.initialise()

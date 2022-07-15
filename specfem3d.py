@@ -28,6 +28,12 @@ class SPECFEM3D():
 
     def initialise(self):
 
+        print()
+        print("*******************************************************************************************************")
+        print("                        INITIALISING SPECFEM3D PYTHON TEMPORARY VERSION                                ")
+        print("*******************************************************************************************************")
+
+
         # Calc. relaxation time:
         self._calc_relaxation_time()
 
@@ -68,19 +74,21 @@ class SPECFEM3D():
 
         self._allocate_free_variables_and_others()
 
-
-        # Compute the mass matrix:
         self._calc_jacobian()
 
-        self._compute_mass_elastic_global_WE()
 
-        self._calc_solid_u_phi_coupling()
-        self._calc_solid_phi_u_coupling()
+        # Needs a background gravity term for bilinear form (\nabla \Phi):
+        self._set_background_gravity()
 
 
-        # Compute BLF T1:
-        #self._compute_BLF_T1()
-        #print()
+        # Calculating bilinear form terms:
+        print("Calculating bilinear form:")
+        self._calc_BF_poissons_term()       # Term 1
+        self.calc_BF_bulk_term()            # Term 2
+        #self._calc_BF_strain_deviator()     # Term 3  - SLOW SO COMMENT OUT UNTIL NEEDED - NUMBA?
+        self._calc_BF_background_grav_1()   # Term 4.1
+        self._calc_BF_background_grav_2()   # Term 4.2
+
 
     def _calc_relaxation_time(self):
         # currently not implemented:
@@ -301,6 +309,7 @@ class SPECFEM3D():
         self.storemmat_global   = np.zeros(self.m.nnode)
         self.storemmat_global2   = np.zeros(self.m.nnode)
 
+
     def _allocate_inbuild_preconditioner(self):
 
         self.storederiv = np.zeros((self.m.ndim, self.m.ngll, self.m.ngll, self.m.nelmt))
@@ -313,44 +322,6 @@ class SPECFEM3D():
             self.ndscale = np.zeros(self.neq)
 
 
-
-    def _compute_BLF_T1(self):
-        # create matrix:
-        self.blf_t1 = np.zeros((self.m.nedof , self.m.nelem))
-
-
-        for ielem in range(self.m.nelem): # need to sum over all eventually
-            n = 0
-            for igll in range(self.m.ngll):
-
-                kappa = self.m.bulkmod_elmt[igll, ielem]
-
-                for idof in range(self.m.nndofu):
-
-                        W = self.m.gll_weights[igll]
-
-
-                        # Calculate the jacobian
-                        num = self.m.g_num[:, ielem]
-                        coord = np.transpose(self.m.g_coord[:, num[self.m.hex8_gnode - 1] - 1])
-                        jacobian = np.matmul(self.m.dshape_hex8[:,:,igll], coord)
-                        detjac = np.linalg.det(jacobian)
-                        jacinv = np.linalg.inv(jacobian)
-
-
-                        elemconstants = W * detjac * kappa
-
-                        idofvariables = jacinv[idof,idof] * self.m.dlagrange_gll[idof, igll, igll]
-
-                        jsum = 0
-                        for j in range(3):
-                            jsum += jacinv[j,j] * self.m.dlagrange_gll[idof, j, j]
-
-
-                        self.blf_t1[n, ielem] = elemconstants * idofvariables * jsum
-                        n += 1
-
-        print()
 
 
 
@@ -377,6 +348,11 @@ class SPECFEM3D():
 
                         gll_ind += 1
 
+
+
+    def _set_background_gravity(self):
+        # Create g_zero and set all to 1 for now:
+        self.g_zero = np.zeros((self.m.ndim, self.m.ngll, self.m.nelem)) + 1
 
 
 
@@ -407,86 +383,201 @@ class SPECFEM3D():
                 self.detjac[igll, i_elem]         =  np.linalg.det(jacobian)
                 self.jacinv[:,:, igll, i_elem]    =  np.linalg.inv(jacobian)[:,:]
 
-        print()
 
 
 
 
 
 
-    def _calc_solid_u_phi_coupling(self):
-        # Term 3: For sum over solid elements we have:
-        # sum(e_solid) sum(nndof) sum(gll) rho pi_vol lambda_i phi_dot
-        # This will result in a coefficient matrix that is of dimension
-        # (nedof_u  x  nedof_phi )
-        # THIS MATRIX MULTIPLIES THE PHI VALUES
 
+    def _calc_poisson_term_HNG(self):
+        # THIS MATRIX MULTIPLES THE PHI VALUES
+        # Using the matrix format that HNG proposed
         # Output matrix will be called H:
         if self.m.nedofphi != 1:
             Warning(f"Calculating solid phi coeff. matrix even tho self.m.nedofphi = {self.m.nedofphi}")
 
-        self.H = np.zeros((self.m.nelem, self.m.nedofu, self.m.ngll))
+        self.P_HNG = np.zeros(( self.m.nelem, self.m.ngll, self.m.ngll))
 
-        # loop through elements
         for i_elem in range(self.m.nelem):
-            n = 0
-            for igll in range(self.m.ngll):         # loop through gll point:
-                for idof in range(self.m.nndofu):  # loop through degrees of freedom
+            # Matrix wise calc
+            for igll in range(self.m.ngll):
+                weight = self.m.gll_weights[igll]
+                jacw = self.detjac[igll, i_elem] * weight
 
-                    # Check if a solid and not in space (inf element)
-                    # - v. bad way of checking but suffices for  this example.
-                    if np.logical_and(self.m.shearmod_elmt[igll,i_elem] > 0,
-                                      self.m.massden_elmt[igll,i_elem]  > 0):
+                deriv = np.matmul(np.transpose(self.m.dlagrange_gll[:, igll, :]), self.jacinv[:, :, igll, i_elem])
+                D = np.matmul(deriv, np.transpose(deriv))
 
-                        rho = self.m.massden_elmt[igll,i_elem]
-                        weight = self.m.gll_weights[igll]
-                        jacw = self.detjac[igll, i_elem] * weight
-
-                        # produce deriv: an ngll x ndof array
-                        deriv = np.matmul(np.transpose(self.m.dlagrange_gll[:,igll,:]), self.jacinv[:,:, igll, i_elem] )
-
-                        d = deriv[igll, idof]
-
-                        self.H[i_elem, n, igll] = rho * jacw * d
-
-                        n += 1
-        print()
+                self.P_HNG[i_elem, :,:] += jacw * D
 
 
 
-    def _calc_solid_phi_u_coupling(self):
-        # Term 4: For sum over solid elements we have:
-        # sum(e_solid) sum(nndof) sum(gll) rho pi_vol lambda_i u_dot
-        # This will result in a coefficient matrix that is of dimension
-        # (nedof_phi  x  nedof_u )
-        # THIS MATRIX MULTIPLES THE U VALUES
+    def _calc_BF_poissons_term(self):
+        print("          poissons eqn term...")
 
-        # Output matrix will be called H:
-        if self.m.nedofphi != 1:
-            Warning(f"Calculating solid phi coeff. matrix even tho self.m.nedofphi = {self.m.nedofphi}")
+        # Equivalent to the matrix formulation down to 13 decimal palces
+        self.P = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
 
-        # If phi is active then the dof for an element = ngll
-        self.G = np.zeros((self.m.nelem, self.m.ngll, self.m.nedofu))
-
-        # loop through elements
         for i_elem in range(self.m.nelem):
-            n = 0
-            for idof in range(self.m.nndofu):           # loop through degrees of freedom
-                for igll in range(self.m.ngll):         # loop through gll point:
+            for abg in range(self.m.ngll):
+                for stv in range(self.m.ngll):
+                    quad_sum = 0
+                    for abgbars in range(self.m.ngll):
+                        w = self.m.gll_weights[abgbars]
+                        jacdet = self.detjac[abgbars, i_elem]
 
-                    # Check if a solid and not in space (inf element)
-                    if np.logical_and(self.m.shearmod_elmt[igll,i_elem] > 0,
-                                      self.m.massden_elmt[igll,i_elem]  > 0):
+                        i_sum = 0
+                        for i in range(3):
+                            t1 = 0
+                            for j in range(3):
+                                t1 += self.jacinv[j, i, stv, i_elem] * self.m.dlagrange_gll[j, abgbars, abg]
 
-                        rho = self.m.massden_elmt[igll,i_elem]
-                        weight = self.m.gll_weights[igll]
-                        jacw = self.detjac[igll, i_elem] * weight
+                            t2 = 0
+                            for q in range(3):
+                                t2 += self.jacinv[q, i, stv, i_elem] * self.m.dlagrange_gll[q, abgbars, stv]
 
-                        # produce deriv: an ngll x ndof array
-                        deriv = np.matmul(np.transpose(self.m.dlagrange_gll[:,igll,:]), self.jacinv[:,:, igll, i_elem] )
+                            i_sum += t1*t2
+                        quad_sum += i_sum * w * jacdet
 
-                        # This is the transpose of the H matrix
-                        self.G[i_elem, igll, n] = rho * jacw * deriv[igll, idof]
+                    self.P[i_elem, stv, abg] = quad_sum
 
-                        n += 1
-        print()
+
+    def calc_BF_bulk_term(self):
+        print("          bulk modulus term...")
+        self.K = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
+
+        for i_elem in range(self.m.nelem):
+
+            m = 0 # Index for output matrix ROWS
+            for abg in range(self.m.ngll):
+                for i in range(3):
+
+                    n = 0 # Index for output matrix COLUMNS
+                    for stn in range(self.m.ngll):
+                        for j in range(3):
+
+                            bars_sum = 0
+                            for abg_bars in range(self.m.ngll):
+                                pi          = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                                kappa       = self.m.bulkmod_elmt[abg_bars, i_elem]
+                                jacinv_ii   = self.jacinv[i, i, abg_bars, i_elem]
+                                jacinv_jj   = self.jacinv[j, j, abg_bars, i_elem]
+                                dlag_i      = self.m.dlagrange_gll[i, abg_bars, abg]
+                                dlag_j      = self.m.dlagrange_gll[j, abg_bars, stn]
+
+                                bars_sum += pi * kappa * jacinv_ii * jacinv_jj * dlag_i * dlag_j
+
+                            self.K[i_elem, m,n] = bars_sum
+
+                            n += 1
+                    m += 1
+
+
+    def _calc_BF_strain_deviator(self):
+        self.D = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
+        print("          strain deviator term...")
+        for i_elem in range(self.m.nelem):
+
+            m = 0  # Index for output matrix ROWS
+            for abg in range(self.m.ngll):
+                for i in range(3):
+
+                    n = 0  # Index for output matrix COLUMNS
+                    for stn in range(self.m.ngll):
+                        for j in range(3):
+
+                            bars_sum = 0
+                            for abg_bars in range(self.m.ngll):
+                                pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                                mu = self.m.shearmod_elmt[abg_bars, i_elem]
+
+                                # Now there are 4 bloody summations to deal with
+                                # put this in a function for now:
+                                sum = self._get_D_internal_sum(i=i, j=j, stn=stn, abg=abg, bars=abg_bars, i_elem=i_elem)
+
+                                bars_sum += (sum * pi * mu)
+
+                            self.D[i_elem, m, n] = bars_sum
+
+                            n += 1
+                    m += 1
+            print(f"Completed {i_elem+1}/{self.m.nelem+1} elements")
+        # Apply the half factor:
+        self.D = self.D*0.5000000000000
+
+
+
+
+    def _get_D_internal_sum(self, i, j, stn, abg, bars, i_elem):
+        internalsum = 0
+        for k in range(3):
+            for r in range(3):
+                for q in range(3):
+                    for p in range(3):
+                        t1 = ((d(r,i) * self.jacinv[k, q, bars, i_elem]) + (d(q,i) * self.jacinv[k, r, bars, i_elem]) - ( (2/3) * d(r,q) * d(i,k) * self.jacinv[k, i, bars, i_elem])) * self.m.dlagrange_gll[k, bars, abg]
+
+                        t2 = ((d(r,j) * self.jacinv[p, q, bars, i_elem]) + (d(q,j) * self.jacinv[p, r, bars, i_elem]) - ( (2/3) * d(r, q) * d(j, p) * self.jacinv[p, j, bars, i_elem])) * self.m.dlagrange_gll[p, bars, stn]
+
+                        internalsum += t1*t2
+        return internalsum
+
+
+    def _calc_BF_background_grav_1(self):
+        print("          background gravity term 1...")
+
+        # Background gravity part 1
+        self.B = np.zeros((self.m.nelem, self.m.ngll * 3, self.m.ngll * 3))
+
+        for i_elem in range(self.m.nelem):
+            m = 0  # Index for output matrix ROWS
+            for abg in range(self.m.ngll):
+                for i in range(3):
+                    n = 0  # Index for output matrix COLUMNS
+                    for abg_bars in range(self.m.ngll):
+                        for j in range(3):
+
+                            g0  = self.g_zero[i, abg, i_elem]
+                            pi  = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                            rho = self.m.massden_elmt[abg_bars, i_elem]
+
+                            k_sum = 0
+                            for k in range(3):
+                                k_sum += self.jacinv[k, j, abg_bars, i_elem]*self.m.dlagrange_gll[k, abg_bars, abg]
+
+
+                            self.B[i_elem, m,n] = k_sum * g0 * pi * rho
+
+                            n += 1
+                    m += 1
+
+
+
+
+    def _calc_BF_background_grav_2(self):
+        print("          background gravity term 2...")
+
+        # Background gravity part 1
+        self.b = np.zeros((self.m.nelem, self.m.ngll * 3, self.m.ngll * 3))
+
+        for i_elem in range(self.m.nelem):
+            m = 0  # Index for output matrix ROWS
+            for abg_bars in range(self.m.ngll):
+                for i in range(3):
+                    n = 0  # Index for output matrix COLUMNS
+                    for stn in range(self.m.ngll):
+                        for j in range(3):
+
+                            g0  = self.g_zero[j, stn, i_elem]
+                            pi  = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                            rho = self.m.massden_elmt[abg_bars, i_elem]
+
+                            k_sum = 0
+                            for k in range(3):
+                                k_sum += self.jacinv[k, i, abg_bars, i_elem]*self.m.dlagrange_gll[k, abg_bars, stn]
+
+
+                            self.b[i_elem, m,n] = k_sum * g0 * pi * rho
+
+                            n += 1
+                    m += 1
+        print("NOTE: Neither background gravity term contains the half outisde the integral in BF")
