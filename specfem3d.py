@@ -1,17 +1,22 @@
+import numba
 import numpy as np
 from copy import copy
-
+from numba import int32, int64, boolean, float64
+from numba import njit, jit, typeof
+from timeit import default_timer as timer
+from bilinear_form_numba import _calc_BF_fluid_internal_numba, _calc_BF_strain_deviator_numba
 
 def d(i, j):
-    # kronecker delta
+    # Kronecker delta function
     if i == j:
         return 1
     else:
         return 0
 
 
-class SPECFEM3D():
 
+
+class SPECFEM3D():
     def __init__(self, m):
         # Takes in mesh object
         self.m = m
@@ -83,11 +88,25 @@ class SPECFEM3D():
 
         # Calculating bilinear form terms:
         print("Calculating bilinear form:")
-        self._calc_BF_poissons_term()       # Term 1
-        self.calc_BF_bulk_term()            # Term 2
-        #self._calc_BF_strain_deviator()     # Term 3  - SLOW SO COMMENT OUT UNTIL NEEDED - NUMBA?
-        self._calc_BF_background_grav_1()   # Term 4.1
-        self._calc_BF_background_grav_2()   # Term 4.2
+        self._calc_BF_poissons_term()         # Term 1
+        self.calc_BF_bulk_term()              # Term 2
+        self._calc_BF_strain_deviator_numba() # Term 3     - Numba version
+        self._calc_BF_background_grav_1()     # Term 4.1
+        self._calc_BF_background_grav_2()     # Term 4.2
+        self._calc_BF_background_grav_3()     # Term 5
+        self._calc_BF_fluid_int()             # Term 7     - Numba version
+
+
+        # Serial Bilinear Form calculations
+        #self._calc_BF_strain_deviator()    # Term 3 - serial version
+        #self._calc_BF_fluid_int_serial()   # Term 7 - serial version
+
+
+
+
+
+
+
 
 
     def _calc_relaxation_time(self):
@@ -264,7 +283,6 @@ class SPECFEM3D():
 
 
     def _calc_prestress(self):
-
         if self.isstress0:
             raise ValueError('prestress currently not implemented.')
 
@@ -274,6 +292,7 @@ class SPECFEM3D():
         self.extload  = np.zeros(self.neq)
         self.rhoload  = np.zeros(self.neq)
         self.ubcload  = np.zeros(self.neq)
+
 
     def _compute_node_valency(self):
         self.node_valency = np.zeros(self.m.nnode, dtype=int)
@@ -442,6 +461,7 @@ class SPECFEM3D():
                     self.P[i_elem, stv, abg] = quad_sum
 
 
+
     def calc_BF_bulk_term(self):
         print("          bulk modulus term...")
         self.K = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
@@ -473,53 +493,22 @@ class SPECFEM3D():
                     m += 1
 
 
-    def _calc_BF_strain_deviator(self):
-        self.D = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
-        print("          strain deviator term...")
-        for i_elem in range(self.m.nelem):
-
-            m = 0  # Index for output matrix ROWS
-            for abg in range(self.m.ngll):
-                for i in range(3):
-
-                    n = 0  # Index for output matrix COLUMNS
-                    for stn in range(self.m.ngll):
-                        for j in range(3):
-
-                            bars_sum = 0
-                            for abg_bars in range(self.m.ngll):
-                                pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
-                                mu = self.m.shearmod_elmt[abg_bars, i_elem]
-
-                                # Now there are 4 bloody summations to deal with
-                                # put this in a function for now:
-                                sum = self._get_D_internal_sum(i=i, j=j, stn=stn, abg=abg, bars=abg_bars, i_elem=i_elem)
-
-                                bars_sum += (sum * pi * mu)
-
-                            self.D[i_elem, m, n] = bars_sum
-
-                            n += 1
-                    m += 1
-            print(f"Completed {i_elem+1}/{self.m.nelem+1} elements")
-        # Apply the half factor:
-        self.D = self.D*0.5000000000000
 
 
 
+    def _calc_BF_strain_deviator_numba(self):
+        print("          strain deviator term using numba...")
+        self.D = _calc_BF_strain_deviator_numba(detjac        = self.detjac[:,:],
+                                                gll_weights   = self.m.gll_weights[:],
+                                                ngll          = self.m.ngll,
+                                                nelem         = self.m.nelem,
+                                                shearmod      = self.m.shearmod_elmt[:,:],
+                                                jacinv        = self.jacinv[:,:,:,:],
+                                                dlagrange_gll = self.m.dlagrange_gll[:,:,:]
+                                               )
 
-    def _get_D_internal_sum(self, i, j, stn, abg, bars, i_elem):
-        internalsum = 0
-        for k in range(3):
-            for r in range(3):
-                for q in range(3):
-                    for p in range(3):
-                        t1 = ((d(r,i) * self.jacinv[k, q, bars, i_elem]) + (d(q,i) * self.jacinv[k, r, bars, i_elem]) - ( (2/3) * d(r,q) * d(i,k) * self.jacinv[k, i, bars, i_elem])) * self.m.dlagrange_gll[k, bars, abg]
 
-                        t2 = ((d(r,j) * self.jacinv[p, q, bars, i_elem]) + (d(q,j) * self.jacinv[p, r, bars, i_elem]) - ( (2/3) * d(r, q) * d(j, p) * self.jacinv[p, j, bars, i_elem])) * self.m.dlagrange_gll[p, bars, stn]
 
-                        internalsum += t1*t2
-        return internalsum
 
 
     def _calc_BF_background_grav_1(self):
@@ -557,7 +546,7 @@ class SPECFEM3D():
         print("          background gravity term 2...")
 
         # Background gravity part 1
-        self.b = np.zeros((self.m.nelem, self.m.ngll * 3, self.m.ngll * 3))
+        self.B2 = np.zeros((self.m.nelem, self.m.ngll * 3, self.m.ngll * 3))
 
         for i_elem in range(self.m.nelem):
             m = 0  # Index for output matrix ROWS
@@ -576,8 +565,130 @@ class SPECFEM3D():
                                 k_sum += self.jacinv[k, i, abg_bars, i_elem]*self.m.dlagrange_gll[k, abg_bars, stn]
 
 
-                            self.b[i_elem, m,n] = k_sum * g0 * pi * rho
+                            self.B2[i_elem, m,n] = k_sum * g0 * pi * rho
 
                             n += 1
                     m += 1
         print("NOTE: Neither background gravity term contains the half outisde the integral in BF")
+
+
+
+    def _calc_BF_background_grav_3(self):
+        print("          background gravity term 3...")
+
+        # Background gravity part 1
+        self.B3 = np.zeros((self.m.nelem, self.m.ngll * 3, self.m.ngll * 3))
+
+        for i_elem in range(self.m.nelem):
+            m = 0  # Index for output matrix ROWS
+            for abg in range(self.m.ngll):
+                for i in range(3):
+                    n = 0  # Index for output matrix COLUMNS
+                    for stn in range(self.m.ngll):
+                        for j in range(3):
+
+                            bars_sum = 0
+                            for abg_bars in range(self.m.ngll):
+                                pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                                rho = self.m.massden_elmt[abg_bars, i_elem]
+
+                                t1 = self.jacinv[i,i,abg_bars,i_elem] * self.m.dlagrange_gll[i, abg_bars, abg] * \
+                                     self.g_zero[j, abg_bars, i_elem]
+
+                                t2 = self.jacinv[j,j,abg_bars,i_elem] * self.m.dlagrange_gll[j, abg_bars, stn] * \
+                                     self.g_zero[i, abg_bars, i_elem]
+
+                                bars_sum += (t1+t2)*pi*rho
+
+
+                            self.B3[i_elem, m, n] = bars_sum
+
+                            n += 1
+                    m += 1
+        print("NOTE: Doesnt contain the 1/2 outside the integral")
+
+
+
+    def _calc_BF_fluid_int(self):
+        self.Fnumba = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
+
+        print('Term 7: constant terms not defined properly.')
+        g_1 = 1        # imagine g^-1 is always 1
+        del_n_rho = 1  # imagine del_n rho is always 1
+
+        self.Fnumba[:,:,:] = _calc_BF_fluid_internal_numba(detjac=self.detjac[:, :],
+                             gll_weights=self.m.gll_weights[:],
+                             ngll = self.m.ngll,
+                             nelem=self.m.nelem,
+                             g_1 = g_1,
+                             del_n_rho = del_n_rho)
+
+
+
+        ############################# SERIAL BILINEAR FORM TERMS: #############################
+
+        def _calc_BF_fluid_int_serial(self):
+            print("          fluid region gravity term...")
+            self.F = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
+
+            g_1 = 1  # imagine g^-1 is always 1
+            del_n_rho = 1  # imagine del_n rho is always 1
+
+            for i_elem in range(self.m.nelem):
+                for abg in range(self.m.ngll):
+                    for stn in range(self.m.ngll):
+                        for abg_bars in range(self.m.ngll):
+                            pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                            self.F[i_elem, abg, stn] += g_1 * del_n_rho * d(abg_bars, abg) * d(abg_bars, stn) * pi
+
+
+
+
+    def _calc_BF_strain_deviator(self):
+        self.Dserial = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
+        print("          strain deviator term...")
+
+        for i_elem in range(self.m.nelem):
+            m = 0  # Index for output matrix ROWS
+            for abg in range(self.m.ngll):
+                for i in range(3):
+                    n = 0  # Index for output matrix COLUMNS
+                    for stn in range(self.m.ngll):
+                        for j in range(3):
+                            bars_sum = 0
+                            for abg_bars in range(self.m.ngll):
+                                pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                                mu = self.m.shearmod_elmt[abg_bars, i_elem]
+                                sum = self._get_D_internal_sum(i=i, j=j, stn=stn, abg=abg, bars=abg_bars, i_elem=i_elem)
+                                bars_sum += (sum * pi * mu)
+
+                            self.Dserial[i_elem, m, n] = bars_sum
+
+                            n += 1
+                    m += 1
+            print(f"Completed {i_elem+1}/{self.m.nelem+1} elements")
+        # Apply the half factor:
+        self.Dserial = self.Dserial*0.5000000000000
+
+
+
+    def _get_D_internal_sum(self, i, j, stn, abg, bars, i_elem):
+        internalsum = 0
+        for k in range(3):
+            for r in range(3):
+                for q in range(3):
+                    for p in range(3):
+                        t1 = ((d(r,i) * self.jacinv[k, q, bars, i_elem]) + (d(q,i) * self.jacinv[k, r, bars, i_elem])
+                              - ( (2/3) * d(r,q) * d(i,k) *
+                                  self.jacinv[k, i, bars, i_elem])) * self.m.dlagrange_gll[k, bars, abg]
+                        t2 = ((d(r,j) * self.jacinv[p, q, bars, i_elem]) + (d(q,j) * self.jacinv[p, r, bars, i_elem])
+                              - ( (2/3) * d(r, q) * d(j, p) *
+                                  self.jacinv[p, j, bars, i_elem])) * self.m.dlagrange_gll[p, bars, stn]
+
+                        internalsum += t1*t2
+        return internalsum
+
+
+
+
+
