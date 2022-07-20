@@ -4,7 +4,8 @@ from copy import copy
 from numba import int32, int64, boolean, float64
 from numba import njit, jit, typeof
 from timeit import default_timer as timer
-from bilinear_form_numba import _calc_BF_fluid_internal_numba, _calc_BF_strain_deviator_numba
+from bilinear_form_numba import _calc_BF_fluid_internal_numba, _calc_BF_strain_deviator_numba, \
+    _calc_BF_poissons_term_numba, _calc_BF_bulk_term_numba, _calc_BF_bkg_grav3
 
 def d(i, j):
     # Kronecker delta function
@@ -24,6 +25,11 @@ class SPECFEM3D():
         self.nmaxwell = 1
 
 
+        # GLOBAL ARRAYS:
+        self.Phi_global = np.zeros(self.m.nnode)
+
+
+
         # IS IT A DISPLACEMENT BC?
         self.isubc     = True
         self.infbc     = False
@@ -31,12 +37,16 @@ class SPECFEM3D():
         self.isstress0 = False # No pre-stress
         self.solver_diagscale = False
 
-    def initialise(self):
+    def initialise(self, devel=False, devel_arg=None):
 
         print()
         print("*******************************************************************************************************")
         print("                        INITIALISING SPECFEM3D PYTHON TEMPORARY VERSION                                ")
         print("*******************************************************************************************************")
+        self.DEVEL = devel
+        self.devel_arg = devel_arg
+
+
 
 
         # Calc. relaxation time:
@@ -87,21 +97,20 @@ class SPECFEM3D():
 
 
         # Calculating bilinear form terms:
-        print("Calculating bilinear form:")
-        self._calc_BF_poissons_term()         # Term 1
-        self.calc_BF_bulk_term()              # Term 2
+        print("Calculating Bilinear Form terms...")
+        self._calc_BF_poissons_term()         # Term 1     - Numba version
+
+
+        self.calc_BF_bulk_term()              # Term 2     - Numba version
         self._calc_BF_strain_deviator_numba() # Term 3     - Numba version
         self._calc_BF_background_grav_1()     # Term 4.1
         self._calc_BF_background_grav_2()     # Term 4.2
-        self._calc_BF_background_grav_3()     # Term 5
+        self._calc_BF_background_grav_3()     # Term 5     - Numba version
         self._calc_BF_fluid_int()             # Term 7     - Numba version
-
 
         # Serial Bilinear Form calculations
         #self._calc_BF_strain_deviator()    # Term 3 - serial version
         #self._calc_BF_fluid_int_serial()   # Term 7 - serial version
-
-
 
 
 
@@ -431,66 +440,51 @@ class SPECFEM3D():
 
 
 
-    def _calc_BF_poissons_term(self):
+    def _calc_BF_poissons_term(self, tf=None):
         print("          poissons eqn term...")
 
-        # Equivalent to the matrix formulation down to 13 decimal palces
-        self.P = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
+        # Test function for devel
+        if type(tf) == type(None):
+            # Let test function values just equal 1:
+            test_func_matrix = np.zeros((self.m.ngll, self.m.nelem)) + 1
+        else:
+            print("Using test function to calculate P")
+            test_func_matrix = tf
 
-        for i_elem in range(self.m.nelem):
-            for abg in range(self.m.ngll):
-                for stv in range(self.m.ngll):
-                    quad_sum = 0
-                    for abgbars in range(self.m.ngll):
-                        w = self.m.gll_weights[abgbars]
-                        jacdet = self.detjac[abgbars, i_elem]
 
-                        i_sum = 0
-                        for i in range(3):
-                            t1 = 0
-                            for j in range(3):
-                                t1 += self.jacinv[j, i, stv, i_elem] * self.m.dlagrange_gll[j, abgbars, abg]
-
-                            t2 = 0
-                            for q in range(3):
-                                t2 += self.jacinv[q, i, stv, i_elem] * self.m.dlagrange_gll[q, abgbars, stv]
-
-                            i_sum += t1*t2
-                        quad_sum += i_sum * w * jacdet
-
-                    self.P[i_elem, stv, abg] = quad_sum
+        # Equivalent to the matrix formulation down to 13 decimal places
+        self.P = _calc_BF_poissons_term_numba(detjac=self.detjac[:,:],
+                                              gll_weights=self.m.gll_weights[:],
+                                              ngll=self.m.ngll,
+                                              nelem=self.m.nelem,
+                                              jacinv=self.jacinv[:,:,:,:],
+                                              dlagrange_gll=self.m.dlagrange_gll[:,:,:],
+                                              phi_tf = test_func_matrix)
 
 
 
     def calc_BF_bulk_term(self):
         print("          bulk modulus term...")
-        self.K = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
 
-        for i_elem in range(self.m.nelem):
+        if self.DEVEL == False:
+            self.K = _calc_BF_bulk_term_numba(detjac=self.detjac[:,:],
+                                              gll_weights=self.m.gll_weights[:],
+                                              ngll=self.m.ngll,
+                                              nelem=self.m.nelem,
+                                              jacinv=self.jacinv[:,:,:,:],
+                                              dlagrange_gll=self.m.dlagrange_gll[:,:,:],
+                                              bulkmod_elmt=self.m.bulkmod_elmt[:,:])
 
-            m = 0 # Index for output matrix ROWS
-            for abg in range(self.m.ngll):
-                for i in range(3):
+        else :
+            # For development purposes using devel_arg as the kappa
+            self.K = _calc_BF_bulk_term_numba(detjac=self.detjac[:,:],
+                                              gll_weights=self.m.gll_weights[:],
+                                              ngll=self.m.ngll,
+                                              nelem=self.m.nelem,
+                                              jacinv=self.jacinv[:,:,:,:],
+                                              dlagrange_gll=self.m.dlagrange_gll[:,:,:],
+                                              bulkmod_elmt=self.devel_arg)
 
-                    n = 0 # Index for output matrix COLUMNS
-                    for stn in range(self.m.ngll):
-                        for j in range(3):
-
-                            bars_sum = 0
-                            for abg_bars in range(self.m.ngll):
-                                pi          = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
-                                kappa       = self.m.bulkmod_elmt[abg_bars, i_elem]
-                                jacinv_ii   = self.jacinv[i, i, abg_bars, i_elem]
-                                jacinv_jj   = self.jacinv[j, j, abg_bars, i_elem]
-                                dlag_i      = self.m.dlagrange_gll[i, abg_bars, abg]
-                                dlag_j      = self.m.dlagrange_gll[j, abg_bars, stn]
-
-                                bars_sum += pi * kappa * jacinv_ii * jacinv_jj * dlag_i * dlag_j
-
-                            self.K[i_elem, m,n] = bars_sum
-
-                            n += 1
-                    m += 1
 
 
 
@@ -569,50 +563,29 @@ class SPECFEM3D():
 
                             n += 1
                     m += 1
-        print("NOTE: Neither background gravity term contains the half outisde the integral in BF")
-
-
+        print("            --> NOTE: Neither background gravity term contains the half outisde the integral in BF")
 
     def _calc_BF_background_grav_3(self):
         print("          background gravity term 3...")
-
-        # Background gravity part 1
-        self.B3 = np.zeros((self.m.nelem, self.m.ngll * 3, self.m.ngll * 3))
-
-        for i_elem in range(self.m.nelem):
-            m = 0  # Index for output matrix ROWS
-            for abg in range(self.m.ngll):
-                for i in range(3):
-                    n = 0  # Index for output matrix COLUMNS
-                    for stn in range(self.m.ngll):
-                        for j in range(3):
-
-                            bars_sum = 0
-                            for abg_bars in range(self.m.ngll):
-                                pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
-                                rho = self.m.massden_elmt[abg_bars, i_elem]
-
-                                t1 = self.jacinv[i,i,abg_bars,i_elem] * self.m.dlagrange_gll[i, abg_bars, abg] * \
-                                     self.g_zero[j, abg_bars, i_elem]
-
-                                t2 = self.jacinv[j,j,abg_bars,i_elem] * self.m.dlagrange_gll[j, abg_bars, stn] * \
-                                     self.g_zero[i, abg_bars, i_elem]
-
-                                bars_sum += (t1+t2)*pi*rho
+        self.B3  = _calc_BF_bkg_grav3(detjac=self.detjac[:,:],
+                                      gll_weights=self.m.gll_weights[:],
+                                      ngll=self.m.ngll,
+                                      nelem=self.m.nelem,
+                                      jacinv=self.jacinv[:,:,:,:],
+                                      dlagrange_gll=self.m.dlagrange_gll[:,:,:],
+                                      g_zero=self.g_zero[:,:,:],
+                                      massden_elmt=self.m.massden_elmt[:,:])
+        print("            --> NOTE: Doesnt contain the 1/2 outside the integral")
 
 
-                            self.B3[i_elem, m, n] = bars_sum
-
-                            n += 1
-                    m += 1
-        print("NOTE: Doesnt contain the 1/2 outside the integral")
 
 
 
     def _calc_BF_fluid_int(self):
+        print("          fluid gravity term...")
         self.Fnumba = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
 
-        print('Term 7: constant terms not defined properly.')
+        print('            --> NOTE: constant terms not defined properly.')
         g_1 = 1        # imagine g^-1 is always 1
         del_n_rho = 1  # imagine del_n rho is always 1
 
@@ -624,69 +597,92 @@ class SPECFEM3D():
                              del_n_rho = del_n_rho)
 
 
+    def _assemble_poisson_global(self):
+        self.P_global = np.zeros((self.m.nnode, self.m.nnode))
 
-        ############################# SERIAL BILINEAR FORM TERMS: #############################
+        # loop through elements:
+        for ielem in range(self.m.nelem):
+            # IDs for the element nodes
+            num = self.m.g_num[:,ielem]
 
-        def _calc_BF_fluid_int_serial(self):
-            print("          fluid region gravity term...")
-            self.F = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
+            for abg in range(self.m.ngll):
+                for stn in range(self.m.ngll):
 
-            g_1 = 1  # imagine g^-1 is always 1
-            del_n_rho = 1  # imagine del_n rho is always 1
-
-            for i_elem in range(self.m.nelem):
-                for abg in range(self.m.ngll):
-                    for stn in range(self.m.ngll):
-                        for abg_bars in range(self.m.ngll):
-                            pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
-                            self.F[i_elem, abg, stn] += g_1 * del_n_rho * d(abg_bars, abg) * d(abg_bars, stn) * pi
+                    g_ind1 = num[stn]-1     # rows:    -1 for python indexing
+                    g_ind2 = num[abg]-1     # columns: -1 for python indexing
 
 
+                    self.P_global[g_ind1, g_ind2] += self.P[ielem, stn, abg]
 
 
-    def _calc_BF_strain_deviator(self):
-        self.Dserial = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
-        print("          strain deviator term...")
+
+
+
+
+
+
+
+    ############################# SERIAL BILINEAR FORM TERMS: #############################
+    def _calc_BF_fluid_int_serial(self):
+        print("          fluid region gravity term...")
+        self.F = np.zeros((self.m.nelem, self.m.ngll, self.m.ngll))
+
+        g_1 = 1  # imagine g^-1 is always 1
+        del_n_rho = 1  # imagine del_n rho is always 1
 
         for i_elem in range(self.m.nelem):
-            m = 0  # Index for output matrix ROWS
             for abg in range(self.m.ngll):
-                for i in range(3):
-                    n = 0  # Index for output matrix COLUMNS
-                    for stn in range(self.m.ngll):
-                        for j in range(3):
-                            bars_sum = 0
-                            for abg_bars in range(self.m.ngll):
-                                pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
-                                mu = self.m.shearmod_elmt[abg_bars, i_elem]
-                                sum = self._get_D_internal_sum(i=i, j=j, stn=stn, abg=abg, bars=abg_bars, i_elem=i_elem)
-                                bars_sum += (sum * pi * mu)
-
-                            self.Dserial[i_elem, m, n] = bars_sum
-
-                            n += 1
-                    m += 1
-            print(f"Completed {i_elem+1}/{self.m.nelem+1} elements")
-        # Apply the half factor:
-        self.Dserial = self.Dserial*0.5000000000000
+                for stn in range(self.m.ngll):
+                    for abg_bars in range(self.m.ngll):
+                        pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                        self.F[i_elem, abg, stn] += g_1 * del_n_rho * d(abg_bars, abg) * d(abg_bars, stn) * pi
 
 
 
-    def _get_D_internal_sum(self, i, j, stn, abg, bars, i_elem):
-        internalsum = 0
-        for k in range(3):
-            for r in range(3):
-                for q in range(3):
-                    for p in range(3):
-                        t1 = ((d(r,i) * self.jacinv[k, q, bars, i_elem]) + (d(q,i) * self.jacinv[k, r, bars, i_elem])
-                              - ( (2/3) * d(r,q) * d(i,k) *
-                                  self.jacinv[k, i, bars, i_elem])) * self.m.dlagrange_gll[k, bars, abg]
-                        t2 = ((d(r,j) * self.jacinv[p, q, bars, i_elem]) + (d(q,j) * self.jacinv[p, r, bars, i_elem])
-                              - ( (2/3) * d(r, q) * d(j, p) *
-                                  self.jacinv[p, j, bars, i_elem])) * self.m.dlagrange_gll[p, bars, stn]
 
-                        internalsum += t1*t2
-        return internalsum
+def _calc_BF_strain_deviator(self):
+    self.Dserial = np.zeros((self.m.nelem, self.m.ngll*3, self.m.ngll*3))
+    print("          strain deviator term...")
+
+    for i_elem in range(self.m.nelem):
+        m = 0  # Index for output matrix ROWS
+        for abg in range(self.m.ngll):
+            for i in range(3):
+                n = 0  # Index for output matrix COLUMNS
+                for stn in range(self.m.ngll):
+                    for j in range(3):
+                        bars_sum = 0
+                        for abg_bars in range(self.m.ngll):
+                            pi = self.detjac[abg_bars, i_elem] * self.m.gll_weights[abg_bars]
+                            mu = self.m.shearmod_elmt[abg_bars, i_elem]
+                            sum = self._get_D_internal_sum(i=i, j=j, stn=stn, abg=abg, bars=abg_bars, i_elem=i_elem)
+                            bars_sum += (sum * pi * mu)
+
+                        self.Dserial[i_elem, m, n] = bars_sum
+
+                        n += 1
+                m += 1
+        print(f"Completed {i_elem+1}/{self.m.nelem+1} elements")
+    # Apply the half factor:
+    self.Dserial = self.Dserial*0.5000000000000
+
+
+
+def _get_D_internal_sum(self, i, j, stn, abg, bars, i_elem):
+    internalsum = 0
+    for k in range(3):
+        for r in range(3):
+            for q in range(3):
+                for p in range(3):
+                    t1 = ((d(r,i) * self.jacinv[k, q, bars, i_elem]) + (d(q,i) * self.jacinv[k, r, bars, i_elem])
+                          - ( (2/3) * d(r,q) * d(i,k) *
+                              self.jacinv[k, i, bars, i_elem])) * self.m.dlagrange_gll[k, bars, abg]
+                    t2 = ((d(r,j) * self.jacinv[p, q, bars, i_elem]) + (d(q,j) * self.jacinv[p, r, bars, i_elem])
+                          - ( (2/3) * d(r, q) * d(j, p) *
+                              self.jacinv[p, j, bars, i_elem])) * self.m.dlagrange_gll[p, bars, stn]
+
+                    internalsum += t1*t2
+    return internalsum
 
 
 

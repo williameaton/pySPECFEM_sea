@@ -22,7 +22,7 @@ class Material_Block():
 
 class Mesh():
     def __init__(self, path, fname, ngllx, nglly, ngllz, ngnode,
-                 ISDISP_DOF=True, ISPOT_DOF=True):
+                 ISDISP_DOF=True, ISPOT_DOF=True, ISNONDIMENSIONAL=True):
         self.path  = path
         self.fname = fname
 
@@ -45,7 +45,7 @@ class Mesh():
                                             # if ngllx != nglly or ngllz
 
         self.infbc = False
-        self.nondimensionalise = True
+        self.nondimensionalise = ISNONDIMENSIONAL
 
         self.ISDISP_DOF = ISDISP_DOF
         self.ISPOT_DOF = ISPOT_DOF
